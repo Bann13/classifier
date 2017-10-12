@@ -1,0 +1,586 @@
+library(caret)
+library(openxlsx)
+library(rattle)
+library(rpart.plot)
+library(data.table)
+set.seed(107)
+
+########## Load Data ##########
+## Samples on columns, genes on rows
+setwd("/Users/benho/Desktop/Huang/Nanostrings/R")
+
+# 1. Data
+gep_data <- fread("/Users/benho/Desktop/Huang/Nanostrings/Data/15_Batch_Corrected_Data_no_FFPE_original_anno.csv", data.table = FALSE, stringsAsFactors = FALSE, header = FALSE)
+# 2. Features
+#features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/Data/1vOthers_ttest.txt.top100.FDR", as.is = TRUE, stringsAsFactors = FALSE)
+features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/Data/Features/Nanostrings_Features_2017-08-18.txt", as.is = TRUE, stringsAsFactors = FALSE)
+
+
+# 3. Class Label
+gep_class <- as.data.frame(read.xlsx("/Users/benho/Desktop/Huang/Nanostrings/Membership/GEP_memberships_2017-07-13.xlsx", sheet = "Torchia_Consensus"))
+rownames(gep_class) <- gep_class$Huang_ID
+
+#optional test set #
+testing_gep_class <- as.data.frame(read.xlsx("/Users/benho/Desktop/Huang/Nanostrings/Membership/GEP_memberships_2017-07-23.xlsx", sheet = "Summary"))
+rownames(testing_gep_class) <- testing_gep_class$Huang_ID
+
+# 4. Split (1 = yes , 0 = no all data used , 2 = use all for training and provide separate testing set)
+split <- 1
+training_per <- 0.8 
+# 5 feature list name.
+models <- c("rf","glmnet","pam", "nb", "rpart")
+
+    # Train_2
+# 7 custom feature list (1 = yes , 0 = no all data used). If yes also select #8
+use_alg_freatures <- 0
+
+# 2b Alg Features
+#alg_features_list <- read.xlsx("/Users/benho/Desktop/Huang/Nanostrings/Data/Nanostring_results_2017-07-07.xlsx", sheet = "Features")
+#alg_features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/R/NanoString_GEP_N64_normalized_80_20_spilt_100_genes_Important_Variables.txt", sep=" ")
+#alg_features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/R/NanoString_GEP_N64_normalized_no_split_100_genes_5_reps_Alg_Important_Variables.txt", sep=" ")
+
+#alg_features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/R/test_repeat_NanoString_GEP_N64_normalized_80_20_spilt_100_genes_Important_Variables.txt", sep=" ")
+#alg_features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/R/NanoString_GEP_N64_normalized_80_20_spilt_100_genes_1000_reps_Important_Variables.txt", sep=" ")
+#alg_features_list <- read.table("/Users/benho/Desktop/Huang/Nanostrings/R/NanoString_GEP_N64_normalized_80_20_spilt_100_genes_5_reps_Alg_Important_Variables.txt", sep=" ")
+alg_features_list <- read.table(paste0(prefix,"_Alg_Important_Variables.txt"), sep=" ")
+alg_features_list <- read.table("NanoString_GEP_N64_normalized_no_split_100_genes_5_reps_Alg_Important_Variables.txt")
+genes <- c("CLIC6","FABP7","NNAT", "ASCL1","H19","MT3","C1orf61","PTPRZ1","CCK","COL1A2","TPD52L1","PCP4","SLC13A4","OTX2","LUM")
+alg_features_list <- as.data.frame(matrix(genes, nrow=length(genes), ncol=1))
+
+
+
+# 8 max number of top features
+# e.g. max 100 to min 100
+# min_features must be >1
+max_features <- 36
+min_features <- 2
+
+# 6 Output Prefix
+# Project_100_5_reps_genes
+#prefix <- "NanoString_GEP_N64_normalized_80_20_spilt_100_genes_5_reps_9_genes"
+#prefix <- "NanoString_GEP_N64_normalized_80_20_spilt_100_genes_5_reps_2-30_genes"
+prefix <- "NanoString_GEP_N64_normalized_80_20_NanostringGenesetV1_5_reps_2-36_genes"
+
+
+
+########## Code ##########
+# Format gep_data (Split = 0 , 1 and 2)
+print(gep_data[1:10,1:3])  #preview data
+rownames(gep_data) <- gep_data[,1]  # assign genes as rownames
+gep_data <- gep_data[,-1]
+colnames(gep_data) <- gep_data[2,]  # assign second row (ie Genomic Analysis name) as colnames (sample names)
+gep_data <- gep_data[c(1:5) * -1, ] # remove all annotations from the first 5 rows
+print(gep_data[1:3,1:3])  #preview data after
+# Transform to numeric dataframe
+gep_data_numeric <- data.frame(lapply(gep_data,as.double)) # all numbers are char so had to transform it this way. Note the use of data.frame otherwise you will get a list from lapply
+gep_data_numeric[1:3,1:3]
+rownames(gep_data_numeric) <- rownames(gep_data)
+gep_data <- gep_data_numeric
+
+# Extracting overlapping samples (Split = 0 , 1 and 2)
+samples_training <- data.frame()
+matching_samples<-intersect(gep_class$Huang_ID, colnames(gep_data)) ## keep overlapping samples only
+write(paste0(length(matching_samples)," samples found."),stdout())
+# V2 N=53 , V3 N=64
+
+matching_samples_and_class <- as.data.frame(gep_class[matching_samples,]$Torchia_2016_Meth_Gep_Consensus_Subgroup)
+rownames(matching_samples_and_class) <- gep_class[matching_samples,]$Huang_ID
+colnames(matching_samples_and_class) <- "Group"
+
+
+## Separate testing set ## (Split = 2 only)
+samples_testing <- data.frame()
+samples_testing <- as.data.frame(testing_gep_class[testing_gep_class$Training_Testing == "Testing",])
+
+testing_matching_samples <- as.data.frame(subset(gep_data, select = samples_testing$Huang_ID)) # gives error if samples are missing
+#testing_matching_samples <- samples_testing[samples_testing$Huang_ID %in% colnames(gep_data),] # gives whatever is avaliable
+testing_matching_samples <- t(testing_matching_samples)
+
+testing_samples <- c()
+testing_samples <- as.data.frame(samples_testing$`Subgroup.(GEP)`)
+rownames(testing_samples) <- samples_testing$Huang_ID
+colnames(testing_samples) <- "Group"
+testing_samples$Group <- gsub("1", "Group1",testing_samples$Group)
+testing_samples$Group <- gsub("2", "Group2A",testing_samples$Group)
+testing_samples$Group <- gsub("3", "Group2B",testing_samples$Group)
+
+testing_samples
+testing<- merge(testing_matching_samples,testing_samples, by="row.names")
+write(paste0(nrow(testing)," samples found in test set."),stdout())
+# N=26
+
+
+
+########## Split ##########
+if (split == 1) {
+  print(paste0("Splitting ",training_per," data for training..."))
+  nrow(matching_samples_and_class)  ## Check number of input
+  inTrain <- createDataPartition(y = matching_samples_and_class$Group, ## the outcome data are needed for random sampling
+                                 p = training_per,     ## The percentage of data in the training set
+                                 list = FALSE)
+  
+  training_samples <- matching_samples_and_class[ inTrain,,drop = FALSE]
+  testing_samples <- matching_samples_and_class[-inTrain,,drop = FALSE]
+  print(paste0("Training set dim: ",nrow(training_samples)," ",ncol(training_samples)," Testing set dim: ",nrow(testing_samples), " ", ncol(testing_samples)))
+
+} else if (split ==0) {
+  print(paste0("Using all data for training"))
+  training_samples <- matching_samples_and_class
+  print(paste0("Training set dim: ",nrow(training_samples)," ",ncol(training_samples)))
+} else if (split ==2) {
+  print(paste0("Using all data for training and use separate list for testing"))
+  training_samples <- matching_samples_and_class
+  print(paste0("Training set dim: ",nrow(training_samples)," ",ncol(training_samples)))
+## Testing set
+
+  print(paste0("Using all data for training"))
+  testing_samples
+}
+
+saveRDS(training_samples, file=paste0(prefix,"_training_samples.RDS"))
+saveRDS(testing_samples, file=paste0(prefix,"_testing_samples.RDS"))
+
+
+########## Part 2  ##########
+
+########## Output reports ##########
+internal_performance_metrics <- c("alg", "Num_features","FinalModel_pos", "Accuracy", "AccuracySD", "Kappa", "KappaSD")
+internal_performance <- as.data.frame(matrix(nrow = 0, ncol = length(internal_performance_metrics)))
+colnames(internal_performance) <- internal_performance_metrics
+
+important_var <- as.data.frame(matrix(nrow=max_features)) # subtract Group
+important_var_score <- as.data.frame(matrix(nrow=max_features)) # subtract Group
+
+training_model_list <- c()  #stores training models
+
+
+for (alg in models) {
+  
+  print(paste0("algorithm: ",alg))
+  filename = paste0(prefix,"_",alg)  
+
+  for (i in max_features:min_features) {
+
+   print(paste0("algorithm: ",alg, " repeat: ", i))
+
+    ########### Extract features ##########
+    if (use_alg_freatures == 1) {
+      n_alg_features <- head(alg_features_list, n = i)
+      #select <- gep_data[as.character(n_alg_features[,eval(paste0(alg,"_",100))]), rownames(matching_samples_and_class)]  # from Excel and thru a vaiable using eval()
+      select <- gep_data[as.character(n_alg_features$V1), rownames(matching_samples_and_class)]  # Jon's list
+      print(paste0(i," of the alg features list selected for ",alg))
+    } else if (use_alg_freatures == 0 ) {
+      n_features <- head(features_list, n = i)
+      select <- gep_data[n_features$V1, rownames(matching_samples_and_class)]  # from simple list
+      print(paste0(i," of the full features list selected for ",alg))
+    } 
+    dim(select)
+    colnames(gep_data)
+    select_t <- t(select)
+    
+    # Add selected features
+    training <- merge(training_samples, select_t, by="row.names") # merge with memberships
+    dim(training)
+    row.names(training) <- training$Row.names
+    training <- training[,-1]
+    
+    
+    ########## Remove Extra Annotation from file ##########
+    #data <- data[,-1 * c(1:3)] # drop first 3 columns
+   # data <- data[,colnames(data) != "RNA.avaliable.(-80'C)"] # drop RNA.avaliable.(-80'C) column
+   # names(data)[colnames(data) == "Torchia_2016_Meth_Gep_Consensus_Subgroup"] <- "Group"  # rename Torchia_2016_Meth_Gep_Consensus_Subgroup to Group
+    
+  
+    ########## Preprocessing ##########
+    
+    # Return the positions of the variables that are flagged to be problematic.
+    nzv <- nearZeroVar(training, saveMetrics= TRUE)
+    
+    nzv[nzv$nzv,][1:10,]
+    
+    ########## Training ##########
+    
+    
+    ########## Training Settings ##########
+    
+    
+    # Function to specify resampling method (See below).
+    # method = repeatedcv       Resampling method. By default bootstraping is used. Others: "boot", "cv", "LOOCV", "LGOCV", "repeatedcv", "timeslice", "none" and "oob". oob aka out-of-bag estimates, can only be used by random forest, bagged trees, bagged earth, bagged flexible discriminant analysis, or conditional tree forest models. GBM models are not included for OOB. Also, for leave-one-out cross-validation, no uncertainty estimates are given for the resampled performance measures.
+    # number                    Controls with the number of folds in K-fold cross-validation
+    # repeats                   Number of resampling iterations for bootstrapping and leave-group-out cross-validation.
+    # verboseIter               A logical for printing a training log.
+    # returnData                A logical for saving the data into a slot called trainingData
+    # p                         For leave-group out cross-validation: the training percentage
+    # classProbs                a logical value determining whether class probabilities should be computed for held-out samples during resample.
+    # summaryFunction           a function to computed alternate performance summaries.
+    # returnResamp              "all", "final" or "none". This specifies how much of the resampled performance measures to save.
+    # allowParallel             a logical that governs whether train should use parallel processing (if availible).
+    
+    ctrl <- trainControl(method = "repeatedcv", 
+                         repeats = 5,
+                         number = 10,
+                         classProbs = TRUE) # save class probability for things like ROC curve
+                         #verboseIter = TRUE,
+                        # returnResamp = "all"
+    
+    #summaryFunction = twoClassSummary)   # function twoClassSummary for 2 class specifically
+    #summaryFunction = multiClassSummary)   # function defaultSummary
+    
+    ########## Training ##########
+    ##  the function below will pick the tuning parameters associated with the best results
+    # selectionFunction               Used to supply a function to algorithmically determine the final model. "best" is chooses the largest/smallest value, "oneSE" attempts to capture the spirit of Breiman et al (1984) and "tolerance" selects the least complex model within some percent tolerance of the best value. See ?best for more details
+    print(paste0("Training... ",alg))
+    training_class <- as.factor(training$Group)
+    
+    plsFit <- train(training[,-1, drop=FALSE], training_class, method = alg, tuneLength = 10,# by default the function will tune through three values of each tuning parameter.
+                    trControl = ctrl, preProc = c("center", "scale"))
+    assign(paste0(alg,"_",i), plsFit)
+    training_model_list[[paste0(alg,"_",i)]] <- plsFit
+    
+    #trControl = ctrl,   #the criterion that should be optimized
+    #metric = "ROC",   # Accuracy is the default
+    #preProc = c("center", "scale")) ## Center and scale the predictors for the training set and all future samples.
+    
+    ########## Evaluate Results ##########
+    print(paste0("Print results... ",alg))
+    
+    print(plsFit$finalModel$tuneValue)  # Optimal tuning value
+    print(plsFit$results) # Training Results
+    
+    # not all alg have Threshold!
+    #training_model <- data.frame(Alg=plsFit$method, Preprocess=plsFit$preProcess, Metric=plsFit$metric, Threshold=plsFit$bestTune)
+   
+    # plsFit$finalModel$tuneValue gives different number of optimal parameters hence use position instead
+
+    Final_Model_Training_Row <- rownames(plsFit$finalModel$tuneValue)
+    Final_Model_Training_Stats <- plsFit$results[Final_Model_Training_Row,]
+    
+    internal_performance_tmp <-cbind(Alg = plsFit$method, Num_Features = i, Final_Model_Pos = Final_Model_Training_Row, Accuracy = Final_Model_Training_Stats$Accuracy, AccuracySD = Final_Model_Training_Stats$AccuracySD, Kappa = Final_Model_Training_Stats$Kappa, KappaSD = Final_Model_Training_Stats$KappaSD)
+    full_internal_performance_tmp <-cbind(Alg = plsFit$method, Num_Features = i, Final_Model_Pos = rownames(plsFit$finalModel$tuneValue), Accuracy = plsFit$results$Accuracy, AccuracySD = plsFit$results$AccuracySD, Kappa = plsFit$results$Kappa, KappaSD = plsFit$results$KappaSD)
+
+    internal_performance <- rbind(internal_performance, internal_performance_tmp)
+    full_internal_performance <- rbind(internal_performance, internal_performance_tmp)
+    
+    write.table(internal_performance, file = paste0(prefix,"_Alg_Optimized_Training_Attributes.txt"))    #Error in cat(list(...), file, sep, fill, labels, append) : argument 1 (type 'list') cannot be handled by 'cat'
+    write.table(full_internal_performance, file = paste0(prefix,"_Alg_Full_Training_Attributes.txt"))
+
+    saveRDS(plsFit, file=paste0(filename,"_Training_Results.RDS"))
+
+    ## show variables that were used in the final model
+    # randomForest, cforest, ctree, rpart, ipredbagg, bagging, earth, fda, pamr.train, superpc.train, bagEarth and bagFDA.
+    predictors(plsFit)
+
+    ########## Visualize Results ##########
+    # doesn't plot properly for 3 subgroups or with very little features
+    ## Method 1 ##
+    #print(paste0("Print results pt2... ",alg))
+    #pdf(file = paste0(filename,"_Training_Threshold.pdf"))
+    #print(plot(plsFit)) #shows the relationship between the number of PLS components and the resampled estimate of the area under the ROC curve
+    #print(plot(plsFit, metric = "Kappa"))
+    #dev.off()
+    ## Method 2 ##   
+    # when model has at multiple tuning parameters
+    #trellis.par.set(caretTheme())
+    #plot(plsFit, metric = "Kappa", plotType = "level", scales = list(x = list(rot = 90))) # rotate x val text
+    ## Method 3 ##
+    # Plot trees by rpart. Also work for non-rf as well!
+    if(alg == "rpart") {
+      pdf(file = paste0(filename,"_FinalModel.pdf"))
+      rpart.plot(plsFit$finalModel)
+      dev.off()
+      plot(plsFit$finalModel)
+    }
+    plsFit$finalModel
+        
+    if (use_alg_freatures == 0) {
+      ########## Feature Selections ##########
+      ## Method 2: Rank featues by importance
+      
+      # A) Model based approach
+      # Multi-class outcomes              The problem is decomposed into all pair-wise problems and the area under the curve is calculated for each class pair (i.e. class 1 vs. class 2, class 2 vs. class 3 etc.). For a specific class, the maximum area under the curve across the relevant pair-wise AUC’s is used as the variable importance measure.
+      # scale                             The function automatically scales the importance scores to be between 0 and 100
+      # Linear Models
+      # Random Forest
+      # Partial Least Squares
+      # Recursive Partitioning
+      # Bagged Trees
+      # Boosted Trees
+      # Multivariate Adaptive Regression Splines
+      # Nearest shrunken centroids
+      # Cubist
+      
+      print(paste0("Output varImp... ",alg))
+      plsFit
+      Importance <- varImp(plsFit, scale = FALSE)
+      pdf(file = paste0(filename,"_varImp.pdf"))
+      print(plot(Importance, cex=0.5))
+      dev.off()
+      
+      if (length(unique(training_class)) == length(Importance$importance)) { ## importance by multi class (e.g. pam) vs only one class (e.g. rf)
+        Importance_sort <- as.data.frame(apply(Importance$importance,1,FUN = ave))[1,]
+        Importance_sort <- t(Importance_sort[order(Importance_sort, decreasing = TRUE)])
+        colnames(Importance_sort) <- paste0(alg)
+      } else if (length(unique(training_class)) > length(Importance$importance)) {
+        Importance_sort <- Importance$importance[order(Importance$importance, decreasing = TRUE),,drop=FALSE]
+        colnames(Importance_sort) <- paste0(alg)
+      }
+      print(paste0("Writing sorted important variables... ",alg))
+      important_var <- cbind(important_var, rownames(Importance_sort))
+      colnames(important_var)[ncol(important_var)] <- paste0(alg,"_",i)   # rename column
+  
+      important_var_score <- cbind(important_var_score, Importance_sort)
+  
+      write.table(Importance$importance, file=paste0(filename,"_VarImp.txt"))
+      
+      saveRDS(Importance, file=paste0(filename,"_Importance.RDS"))
+    } else if (use_alg_freatures == 1) {
+      print(paste0("Skipping features evaluation... "))
+    }
+    #saveRDS(paste0(alg,"_model"), file=paste0(filename,"_model.RDS"))
+  } # n_features loop
+} # alg loop
+
+## Print important variables ##
+## Results wouldn't change if don't pick new samples.
+important_var <- important_var[,-1] # remove NA column
+important_var_score <- important_var_score[,-1] # remove NA column
+write.table(important_var, file=paste0(prefix,"_Alg_Important_Variables.txt")) 
+write.table(important_var_score, file=paste0(prefix,"_Alg_Important_Variables_Score.txt"))
+saveRDS(training_model_list, file=paste0(prefix,"_Alg_model.RDS"))
+#"rf","glmnet","pam", "nb", "rpart"
+
+
+
+######### Part 3 ##########
+## Plot Results ##
+library(ggplot2)
+
+#training_results <- read.table("NanoString_GEP_N64_normalized_80_20_spilt_100_genes_1000_reps_Optimized_Training_Attributes.txt", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+#training_results <- read.table("NanoString_GEP_N64_normalized_80_20_spilt_30_genes_5_reps_Optimized_Training_Attributes.txt", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+#training_results <- read.table("NanoString_GEP_N64_normalized_80_20_spilt_30_genes_5_reps_21_genes_Testset_Full_Training_Attributes.txt", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+training_results <- read.table("GEP_N64_80_20_split_5_reps_v2/Train_5_2-30_genes/NanoString_GEP_N64_normalized_80_20_spilt_100_genes_5_reps_2-30_genes_Alg_Full_Training_Attributes.txt", stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+training_results <- read.table(paste0(prefix,"_Alg_Full_Training_Attributes.txt"), stringsAsFactors = FALSE, header=TRUE, row.names = 1)
+training_results <- read.table("NanoString_GEP_N64_normalized_no_split_Jon_15_Alg_Full_Training_Attributes.txt")
+training_results <- read.table("NanoString_GEP_N64_normalized_no_split_5_reps_2-15_genes_Alg_Full_Training_Attributes.txt")
+training_results_details <- read.table("NanoString_GEP_N64_normalized_no_split_5_reps_2-15_genes_Alg_Full_Training_Attributes.txt")
+
+
+training_results <- training_results[training_results$Num_Features <= 20,]
+
+## Plot Results ##
+png(filename = paste0(prefix,"_Training_Alg_top15.png"))
+#plot(x=training_results$Num_Features, y=training_results$Accuracy)
+p <- ggplot(training_results, aes(Num_Features,Accuracy))
+p + geom_point(colour = "red", size = 3) + facet_grid(Alg ~ . , labeller = label_both)
+# p + geom_point(colour = "red", size = 3) + facet_grid(Alg ~ . , labeller = label_both) +geom_errorbar(aes(ymin=Accuracy-AccuracySD, ymax=Accuracy+AccuracySD), width=.2, position=position_dodge(.9)) 
+# add sd on to dot plot as well
+dev.off()
+
+# Find feature numbers with highest accuracy #
+# aggregate(training_results$Accuracy, by=list(training_results$Alg), max)
+# aggregate(Accuracy ~ Alg, training_results, max)
+# training_results[ , .SD[which.max(Accuracy)], by = Alg]
+
+
+tabe <- as.data.frame(matrix(ncol=3))
+for (x in models) {
+  df <- training_results[training_results$Alg == x,]
+  v <- df$Num_Features[which.max(df$Accuracy)]
+  acc <- df$Accuracy[which.max(df$Accuracy)]
+  tab <- c(x,v,acc)
+  tabe <- cbind(tabe, tab)
+  print(paste(c(x,v,acc),sep = '\t'))
+}
+tabe
+
+accuracy_results <- as.data.frame(c())
+colnames(accuracy_results) <- c("rf","glmnet","pam","nb","rpart","rpart")
+for (i in 3:30) {
+  print(paste0("feature ",i))
+  accuracy <- data.frame(t(training_results[training_results$Num_Features == i,][,4]))
+  #rownames(accuracy) <- i
+  print(accuracy)
+  accuracy_results <- rbind(accuracy_results,accuracy)
+  print(accuracy_results)
+}
+
+
+########## Test #########
+model_list <- readRDS(paste0(prefix,"_Alg_model.RDS"))
+#model_list <- readRDS("NanoString_GEP_N64_normalized_80_20_spilt_100_genes_5_reps_30_genes_Alg_Models.RDS")
+
+#n_test_features <- 21 # is this still relevant when it's determined by the model?
+min_test_features <- 2 
+max_test_features <- 23
+
+
+########## Output Report ##########
+conf_matrix_list <- c()
+testing_results <- c()
+testing_results_summary <- c()
+testing_results_summary_groups_score <- c()
+
+
+for (alg in models) {
+  for (i in max_test_features:min_test_features) {
+    print(paste0("run ",i))
+
+    ########## Select for samples ##########
+    testing_features <- head(alg_features_list, n = i)
+    testing_select <- as.data.frame(gep_data[as.character(testing_features[,eval(paste0(alg,"_",100))]), rownames(testing_samples)])  # from Excel and thru a vaiable using eval()
+    print(paste0(i," of the alg features list selected for ",alg))
+    testing_select_t <- t(testing_select)
+    testing <- merge(testing_samples, testing_select_t, by="row.names") # merge with memberships
+    dim(testing)
+    ## N=12
+    row.names(testing) <- testing$Row.names
+    testing <- testing[,-1]
+  
+    testing_model <- training_model_list[[eval(paste0(alg,"_",i))]]
+  
+    ########## Test ##########
+    print(paste0("Testing... ",alg,"_",i))
+    Prediction_class <- predict(testing_model, newdata = testing[,-1]) # predicts class
+    Prediction_prob <- predict(testing_model, newdata = testing[,-1], type = "prob") # predicts class probability
+    
+    class_max_prob <- as.data.frame(apply(Prediction_prob,1,max))
+    colnames(class_max_prob) <- "Probability"
+    
+    testing_results <- as.data.frame(cbind(rownames(class_max_prob), alg,i,as.character(Prediction_class),class_max_prob$Probability))
+    colnames(testing_results) <- c("Sample" , "Alg","Num_Features","Class","Probability")
+    #colnames(testing_results_summary_groups_score) <- c("Alg","Features","Class","Probability")
+    testing_results_summary_groups_score <- as.data.frame(rbind(testing_results_summary_groups_score, testing_results))
+    colnames(testing_results_summary_groups_score) <- c("Sample","Alg","Num_Features","Class","Probability")
+    #write.table(testing_results, file=paste0(prefix,"_",alg,"_testing_results.txt"))
+    ########## Confusion Matrix ##########
+    conf_matrix<-confusionMatrix(data = Prediction_class, testing[,1])
+    conf_matrix_list[[eval(paste0(alg,"_",i))]] <- conf_matrix
+    print(conf_matrix)
+    results_overall <- as.data.frame(t(c(alg,i,t(as.data.frame(conf_matrix$overall)))))
+    #colnames(results_overall) <- "Value"
+    colnames(results_overall) <- c("Alg","i","Accuracy","Kappa","AccuracyLower","AccuracyUpper","AccuracyNull","AccuracyPValue","McnemarPValue")
+    
+    testing_results_summary <- rbind(testing_results_summary,results_overall)
+    colnames(testing_results_summary) <- c("Alg","i","Accuracy","Kappa","AccuracyLower","AccuracyUpper","AccuracyNull","AccuracyPValue","McnemarPValue")
+    results_table <- conf_matrix$table
+    results_byClass <- as.data.frame(conf_matrix$byClass)
+
+    ########## Results ##########
+    
+  }
+}
+write.table(testing_results_summary_groups_score, file=paste0(prefix,"_test_N26_testing_results_summary_groups_score.txt"))
+saveRDS(testing_results_groups_score, file=paste0(prefix,"_test_N26_testing_results_summary_groups_score.txt"))
+saveRDS(conf_matrix_list, file=paste0(prefix,"_Alg_Conf_Matrix.RDS"))
+
+## Plot test results ##
+png(filename = paste0(prefix,"_Testing_N26_Alg_top30.png"))
+#plot(x=training_results$Num_Features, y=training_results$Accuracy)
+p <- ggplot(testing_results, aes(Num_Features,Accuracy))
+p + geom_point(colour = "red", size = 3) + expand_limits(x=c(0,20), by = 1) + facet_grid(Alg ~ . , labeller = label_both)
+# p + geom_point(colour = "red", size = 3) + facet_grid(Alg ~ . , labeller = label_both) +geom_errorbar(aes(ymin=Accuracy-AccuracySD, ymax=Accuracy+AccuracySD), width=.2, position=position_dodge(.9)) 
+# add sd on to dot plot as well
+dev.off()
+
+
+#### Heat Map ####
+#install.packages("pheatmap")
+#install.packages("gplots")
+install.packages("heatmap3")
+stringsasfactors=false
+library(pheatmap)
+library(gplots)
+
+n_test_features <- 21
+House_keeping <- as.character(c("ABCF1","ACTB","ALAS1","B2M","CLTC","G6PD","GAPDH","GUSB","HPRT1","LDHA","PGK1","POLR1B","POLR2A","RPL19","RPLP0","SDHA","TBP","TUBB"))
+House_keeping <- as.character(c("GAPDH","TBP","ABCF1"))
+
+n_Housekeeping <- length(House_keeping)
+#House_keeping_anno <- rbind(House_keeping, rep("blue",length(House_keeping)))
+#heatmap_select_anno <- rbind(rownames(heatmap_select), rep("white",nrow(heatmap_select)))
+#row_anno <- t(cbind(House_keeping_anno, heatmap_select_anno))
+#colnames(row_anno) <- c("Genes","Colours")
+
+# Plot Heatmap ##########
+for (alg in models) {
+
+  ## Select Number of features and rbind housekeeping genes
+  heatmap_features <- head(alg_features_list, n = n_test_features)
+  House_keeping_matrix <- cbind(House_keeping,House_keeping,House_keeping,House_keeping,House_keeping)
+  colnames(House_keeping_matrix) <- colnames(heatmap_features)
+  heatmap_features_housekeeping <- rbind(heatmap_features, House_keeping_matrix)
+  heatmap_select <- gep_data[as.character(heatmap_features_housekeeping[,eval(paste0(alg,"_",100))]), rownames(testing_samples)]  # from Excel and thru a vaiable using eval()
+  print(paste0(n_test_features," of the alg features and housekeeping genes selected for ",alg))
+  heatmap_select_t <- t(heatmap_select)
+  heat <- merge(testing_samples, heatmap_select_t, by="row.names") # merge with memberships
+  ## N=12
+  row.names(heat) <- heat$Row.names
+  heat <- heat[,-1] # remove rownames
+  ## Sort by Group ##
+  heat_sort <- heat[order(heat$Group),]
+  
+  #col_anno <- as.data.frame(cbind(as.character(rownames(heat_sort)),as.factor(heat_sort[,1]), as.character(rep("white",nrow(heat)))), stringsAsFactors = FALSE)
+  #names(col_anno) <- c("Sample","Group","Colours")
+  col_anno <- data.frame(Sample = as.character(rownames(heat_sort)), Group = as.character(heat_sort[,1]), stringsAsFactors = FALSE)
+  rownames(col_anno) <- col_anno[,1]
+  col_anno <- col_anno[,-1,drop=FALSE]
+  #col_anno[col_anno$Group == "Group1",]$Colours <- "red"
+  #col_anno[col_anno$Group == "Group2A",]$Colours <- "blue"
+  #col_anno[col_anno$Group == "Group2B",]$Colours <- "green"
+
+  #row_anno <- as.data.frame(t(rbind(rownames(heatmap_select), as.factor(rep("Target",nrow(heatmap_select))), as.character(rep("white",nrow(heatmap_select))))), stringsAsFactors = FALSE)
+  #colnames(row_anno) <- c("Genes","Type","Colours")
+  row_anno <- data.frame(Genes = rownames(heatmap_select),Gene_Type = c(rep("Target",n_test_features),rep("Housekeeping",n_Housekeeping )), stringsAsFactors = FALSE)
+  rownames(row_anno) <- row_anno[,1]
+  row_anno <- row_anno[,-1,drop=FALSE]
+  #row_anno <- data.frame(Genes = rownames(heatmap_select), Type = rep("Target",nrow(heatmap_select)), Colours = as.character(c(rep("white",nrow(heatmap_select)-10)),rep("blue",10)), stringsAsFactors = FALSE)
+
+  #row_anno[row_anno$Genes %in% House_keeping,]$Type <- "Housekeeping"
+  #row_anno[row_anno$Genes %in% House_keeping,]$Colours <- "blue"
+
+  ## Prep data ##
+  heat_sort <- heat_sort[,-1]
+  heat_sort_t <- t(heat_sort)
+  
+  ########## Heatmap settings ##########
+
+  ## by Native heatmap function.
+  #png(filename = paste0(prefix,"_",alg,"_",n_test_features,"_heatmap.png"))
+  #heatmap(heat_sort_t, Colv = NA, RowSideColors = row_anno$Colours, ColSideColors = col_anno$Colours, main = paste0(alg,"_",i), scale = "none")
+  #dev.off()
+  
+    ## by Pheatmap ##
+   GroupColours = list(Group = c("Group1" = "red", "Group2A" = "blue", "Group2B" = "green"),
+                       Gene_Type = c("Target" = "white", "Housekeeping" = "blue")
+                       )
+     #png(filename = paste0(prefix,"_",alg,"_",n_test_features,"_heatmap.png"))
+     pheatmap(
+       heat_sort_t,
+       cluster_rows = TRUE, cluster_cols = FALSE,
+       annotation_col = col_anno,
+       annotation_row = row_anno,
+
+       annotation_colors = GroupColours,
+       main = paste0("heatmap of subtyping with ", n_test_features, " genes (",alg,"_",n_test_features,")"),
+       filename = paste0(prefix,"_",alg,"_",n_test_features,"_heatmap.png")
+     )
+  #dev.off()
+}
+  #########
+
+#  House keeping genes calculation
+
+matching_samples_and_housekeeping<-gep_data[House_keeping,rownames(matching_samples_and_class)]
+
+sd <- apply(matching_samples_and_housekeeping, 1, FUN=sd)
+mean <- apply(matching_samples_and_housekeeping, 1, FUN=mean)
+summ <- rbind(sd,mean)
+
+png(filename = paste0(prefix,"_Housekeeping_Genes.png"))
+plot(x=mean,y=sd, xlab = "Mean_Log2_Expression",ylab="SD", main="GEP Housekeeping Genes Expression (N=64)")
+text(x=mean,y=sd, labels=colnames(summ), cex= 0.7, pos = 3)
+dev.off()
+housekeeping_summary <- summary(t(matching_samples_and_housekeeping))
+housekeeping_summary <- rbind(housekeeping_summary, sd)
+housekeeping_summary
+rownames(housekeeping_sd[4,])
